@@ -1,0 +1,119 @@
+---
+title: "GWAS"
+output: html_document
+---
+
+# load packages and additional scripts
+```{r}
+source("function.R")
+library(lfmm)
+library(cate)
+library(glmnet)
+library(sva)
+library(naturalgwas)
+library(reshape2)
+library(tidyverse)
+```
+
+# Load object
+
+```{r}
+load("data/arabidopsis_chr5_atwell_ft16.RData")
+
+# Genotypic data for Arabidopsis thaliana (Atwell et al. 2010)
+geno <- arabidopsis.chr5.atwell.ft16$geno
+# metadata
+meta <- arabidopsis.chr5.atwell.ft16$meta
+# Genetic map: positions on chromosome
+coor.chr <- arabidopsis.chr5.atwell.ft16$coor.chr
+# phenotype of flowering time
+pheno <- meta$pheno.ft16.atwell
+# geographic coordinates for each individual
+coor <- meta[,c("longitude", "latitude")]
+rm(arabidopsis.chr5.atwell.ft16)
+```
+
+# Launch GWAS for each methods
+
+We are carrying out an association study (GWAS) between the Arabidopsis thaliana genotypes and the FT16 flowering time phenotype. GWAS is performed by 6 different methods: sparse lfmm, bslmm, lasso, ridge lfmm, cate and sva.
+
+```{r}
+# find K
+# sv <- svds(geno, k = 20)
+k = 10
+
+# sparse lfmm regression
+lf <- lfmm::lfmm_lasso(Y = geno, X = pheno, K = k, nozero.prop = pc)$B
+
+# bslmm gemma
+# Gemma is not an R package
+map.e <- data.frame(a = 1:ncol(geno), b =  1:ncol(geno), chr = rep(1, ncol(geno)))
+bslmm <- gemma2(geno = geno, pheno = matrix(pheno), map = map.e, covar =  NULL, 
+                gemma.exe = "./../gemma.macosx", 
+                opt.mat = 1, met.reg = "bslmm", lmm = "4", bslmm = "1", 
+                pmin = 0.00001, pmax = 0.0001, opt.bs = "-w  10000 -s  10000")
+bs <- rep(0,ncol(geno))
+bs[bslmm$rs] <- bslmm$beta
+
+# lasso method from the glmnet package
+cvfit = glmnet::cv.glmnet(x = geno, y = pheno)
+a <- coef(cvfit, s = cvfit$lambda.1se) 
+b <- data.frame(a@i, a@x)[-1,] # remove intercept
+las <- rep(0, p)
+las[b[,1]] <- b[,2]
+
+# ridge lfmm
+rlf <- lfmm::lfmm_ridge(Y = geno, X = pheno, K = k)$B
+
+# cate 
+cat <- cate::cate(geno ~ pheno, X.data = data.frame(pheno), Y = geno, r = k)$beta
+
+# sva 
+mod <- model.matrix(~ pheno)
+mod0 <- model.matrix(~ 1, data = data.frame(pheno))
+svobj <- sva::sva(t(geno), mod, mod0, n.sv = k)
+modSv <- cbind(mod, svobj$sv)
+# linear model between exposure and the matrix of genetic markers (with latent lariable estimate with sva)
+sva <- apply(geno, 2, function(x) summary(lm(x ~ modSv[,-1]))$coefficients[2, 1])
+
+# the table contains the size effects for each SNP (for each method) and the position on the chromosomes.
+beta <- data.frame(sparse_lfmm = lf, bslmm = bs, lasso = la, 
+                   ridge_lfmm = rlf, cate = cat[,1], sva = sva)
+beta <- cbind(beta, posi = coor.chr$pos)
+```
+
+# Script for figure 4
+
+GWAS of flowering time in A. thaliana (chromosome 5). A) Effect size estimates for LASSO. B) Effect size estimates for BSLMM. C) Reverse effect size estimates for sparse LFMM. D) Average of reverse effect size estimates for non- sparse methods (ridge LFMM, CATE and SVA). Grey bars represent Arabidopsis SNPs associated with the FT16 phenotype in (Atwell et al., 2010), and correspond to the FLC and DOG1 genes.
+
+```{r}
+# The non-sparse methods (ridge lfmm, cate and sva) 
+# are grouped together because they are more than 95% correlated. 
+# For this group of methods, we take the average of the effect sizes.
+no_sparse <- rowMeans(beta[, 5:7])
+
+beta <- beta[, -(5:7)]
+
+beta$no_sparse <- no_sparse
+
+beta <- melt(beta, id.vars = 1)
+
+levels(beta$variable) <- c("Sparse lfmm", "bslmm", "lasso", "No sparse methods")
+
+# Genes FLC and DOG1, found by Atwell in its association study with the FT16 phenotype.
+# Position of these 2 genes on chromosome 5
+gene <- c(3188328, 18598041)
+
+ggplot(beta, aes(posi, value, color = variable)) +
+  geom_vline(xintercept = gene, color = "grey", alpha = 0.8) +
+  geom_point(size = 0.5) +
+  facet_wrap(~ variable, nrow = 2) +
+  xlab("Positions on chromosome") +
+  ylab("Effect Size") +
+  theme_bw() +
+  theme(legend.position = "none",
+        strip.background = element_blank()) +
+  scale_color_manual(values = c("orange", "antiquewhite4", "purple", "grey"))
+
+```
+
